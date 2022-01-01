@@ -1,0 +1,3 @@
+module MyDistributed
+
+end
