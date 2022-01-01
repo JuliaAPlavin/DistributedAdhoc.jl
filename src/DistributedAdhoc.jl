@@ -1,4 +1,4 @@
-module MyDistributed
+module DistributedAdhoc
 
 using Reexport
 @reexport using Distributed

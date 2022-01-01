@@ -1,1 +1,1 @@
-# MyDistributed.jl
+# DistributedAdhoc.jl
