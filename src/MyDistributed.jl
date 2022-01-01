@@ -17,8 +17,7 @@ Creates a temporary file at the worker, with the same `basename` as `path`.
 function send_file(path::AbstractString, pid::Int)
     remote_dir = remotecall_fetch(mktempdir, pid)
     remote_path = joinpath(remote_dir, basename(path))
-    send_file(path => remote_path, pid)
-    return remote_path
+    return send_file(path => remote_path, pid)
 end
 
 """ Send local file `local_path` to `remote_path` at the worker `pid`. """
@@ -26,6 +25,7 @@ function send_file((local_path, remote_path)::Pair{<:AbstractString, <:AbstractS
     content = read(local_path)
     written = remotecall_fetch(write, pid, remote_path, content)
     @assert written == length(content)
+    return remotecall_fetch(abspath, pid, remote_path)
 end
 
 """ Send the local Julia environment to all active workers and activate it there.
