@@ -4,15 +4,19 @@ using Reexport
 @reexport using Distributed
 import Pkg
 import Sockets
-
-using DocStringExtensions
-@template (FUNCTIONS, METHODS, MACROS) = """$(TYPEDSIGNATURES)\n$(DOCSTRING)"""
+using Glob
 
 
 
-""" Send local file `path` to the worker `pid`.
+"""
+    send_file(local::String, pid::Int)
+    send_file(local => remote, pid::Int)
 
-Creates a temporary file at the worker, with the same `basename` as `path`.
+Send the file `local` from the current machine to the `pid` worker, saving as the `remote` path.
+The parent directory of `remote` should already exist.
+
+If the `remote` path isn't specified, creates a temporary file at the target worker with the same `basename` as `local`.
+Returns the full path to the created file.
 """
 function send_file(path::AbstractString, pid::Int)
     remote_dir = remotecall_fetch(mktempdir, pid)
@@ -20,7 +24,6 @@ function send_file(path::AbstractString, pid::Int)
     return send_file(path => remote_path, pid)
 end
 
-""" Send local file `local_path` to `remote_path` at the worker `pid`. """
 function send_file((local_path, remote_path)::Pair{<:AbstractString, <:AbstractString}, pid::Int)
     content = read(local_path)
     written = remotecall_fetch(write, pid, remote_path, content)
@@ -28,23 +31,77 @@ function send_file((local_path, remote_path)::Pair{<:AbstractString, <:AbstractS
     return remotecall_fetch(abspath, pid, remote_path)
 end
 
-""" Send the local Julia environment to all active workers and activate it there.
+"""
+    send_dir(local::String, pid::Int; include::Vector{String})
+    send_dir(local => remote, pid::Int; include::Vector{String})
 
-Instantiates the environment using a single worker at each host, other workers just `activate` the created env. """
-function send_env_activate_perhost(; env_dir=dirname(Base.active_project()))
+Send the directory `local` from the current machine to the `pid` worker, saving as the `remote` path.
+
+If the `remote` path isn't specified, creates a temporary directory at the target worker.
+Returns the full path to the created directory.
+
+`include` is a list of file patterns to send, as accepted by `Glob.jl`.
+"""
+function send_dir(local_dir::AbstractString, pid::Int; include::Vector)
+    remote_dir = remotecall_fetch(mktempdir, pid)
+    return send_dir(local_dir => remote_dir, pid; include)
+end
+
+function send_dir((local_dir, remote_dir)::Pair{<:AbstractString, <:AbstractString}, pid::Int; include::Vector)
+    localfiles = mapreduce(vcat, include) do pat
+        glob(pat, local_dir)
+    end |> unique
+    remotefiles = map(f -> joinpath(remote_dir, relpath(f, local_dir)), localfiles)
+    remotedirs = dirname.(remotefiles) |> unique
+    remotecall_fetch.(mkpath, pid, remotedirs)
+    for (l, r) in zip(localfiles, remotefiles)
+        send_file(l => r, pid)
+    end
+    return remote_dir
+end
+
+"""    send_env_activate_perhost([local_dir]; include)
+
+Send the local Julia environment to all available workers, activate and instantiate it there.
+
+Instantiates the environment using a single worker at each host, other workers just activate the created env.
+
+Uses the current active project environment `dirname(Base.active_project())` if `local_dir` is omitted.
+
+`include` is a list of file patterns to send, as accepted by `Glob.jl`.
+
+# Example
+
+Send the current Julia environment, including source code in `src`, developed packages (in `./dev`), scripts (in `./scripts`), and CSV files (in `./data`):
+```
+DistributedAdhoc.send_env_activate_perhost(include=[
+    "*.toml", "src/*.jl", "scripts/*.jl",
+    "dev/*/*.toml", "dev/*/src/*.jl", "dev/*/src/*/*.jl",
+    "data/*.csv",
+])
+```
+"""
+function send_env_activate_perhost(env_dir=dirname(Base.active_project()); include::Vector)
+    dir_by_pid = Dict{Int, String}()
     @sync for (host, pids) in pairs(host_to_pids_dict())
         @async begin
             @info "Sending and activating" host pid=pids[1]
-            remote_env_dir = send_env_activate(pids[1]; env_dir)
-            @sync for pid in pids[2:end]
-                @info "Activating" host pid
-                @async activate(remote_env_dir, pid; instantiate=false)
+            remote_env_dir = send_env_activate(env_dir, pids[1]; include)
+            @sync for pid in pids
+                dir_by_pid[pid] = remote_env_dir
+                @async begin
+                    remotecall_fetch(cd, pid, remote_env_dir)
+                    activate(remote_env_dir, pid; instantiate=false)
+                end
             end
         end
     end
+    return dir_by_pid
 end
 
-" Determine the host-worker mapping and return it as a `Dict`: `hostname => [pids...]`. "
+"    host_to_pids_dict()
+
+Determine the host-worker mapping and return it as a `Dict` of `hostname => [pids...]`. "
 function host_to_pids_dict()
     hostnames = remotecall_fetch.(gethostname, workers())
     host_to_pid = Dict{String, Vector{Int}}()
@@ -54,24 +111,26 @@ function host_to_pids_dict()
     return host_to_pid
 end
 
-" Send the local Julia environment to the worker `pid`, and activate it. "
-function send_env_activate(pid::Int; env_dir=dirname(Base.active_project()), instantiate=true)
-    remote_env_dir = send_projmanifest(pid; local_env_dir=env_dir)
+"    send_env_activate([local_dir], pid; [instantiate=true], include)
+
+Send the local Julia environment to the worker `pid`, activate and optionally `instantiate` it.
+
+Uses the current active project environment `dirname(Base.active_project())` if `local_dir` is omitted.
+
+`include` is a list of file patterns to send, as accepted by `Glob.jl`.
+"
+send_env_activate(pid::Int; kwargs...) = send_env_activate(dirname(Base.active_project()), pid; kwargs...)
+
+function send_env_activate(env_dir, pid::Int; instantiate=true, include::Vector)
+    remote_env_dir = send_dir(env_dir, pid; include)
     activate(remote_env_dir, pid; instantiate)
     return remote_env_dir
 end
 
-" Send `Project.toml` and `Manifest.toml` files from the local environment to a new temporary directory at the worker `pid`. "
-function send_projmanifest(pid::Int; local_env_dir::String=dirname(Base.active_project()))
-    remote_env_dir = remotecall_fetch(mktempdir, pid)
-    for f in ["Project.toml", "Manifest.toml"]
-        send_file(joinpath(local_env_dir, f) => joinpath(remote_env_dir, f), pid)
-    end
-    return remote_env_dir
-end
+"    activate(remote_dir, pid; [instantiate=false])
 
-" Activate the Julia environment at `remote_env_dir` at worker `pid`. "
-function activate(remote_env_dir::String, pid::Int; instantiate::Bool=true)
+Activate the Julia environment at `remote_dir` at worker `pid`. Optionally, `instantiate` the environment afterwards. "
+function activate(remote_env_dir::String, pid::Int; instantiate=false)
     Distributed.remotecall_eval(Main, pid, :(import Pkg))
     remotecall_fetch(Pkg.activate, pid, remote_env_dir)
     instantiate && remotecall_fetch(Pkg.instantiate, pid)

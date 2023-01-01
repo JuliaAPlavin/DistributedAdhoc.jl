@@ -15,7 +15,7 @@ using Test
     @test (@fetchfrom W read(remote, String)) == read("runtests.jl", String)
 
     @test (@fetchfrom W Base.ACTIVE_PROJECT[]) |> isnothing
-    DistributedAdhoc.send_env_activate_perhost()
+    DistributedAdhoc.send_env_activate_perhost(include=["*.toml"])
     @test occursin(r"^/tmp/\w+/Project.toml$", @fetchfrom W Base.ACTIVE_PROJECT[])
 end
 
