@@ -60,7 +60,7 @@ function send_dir((local_dir, remote_dir)::Pair{<:AbstractString, <:AbstractStri
     return remote_dir
 end
 
-"""    send_env_activate_perhost([local_dir]; include)
+"""    send_env_activate_everywhere([local_dir]; include)
 
 Send the local Julia environment to all available workers, activate and instantiate it there.
 
@@ -74,14 +74,14 @@ Uses the current active project environment `dirname(Base.active_project())` if 
 
 Send the current Julia environment, including source code in `src`, developed packages (in `./dev`), scripts (in `./scripts`), and CSV files (in `./data`):
 ```
-DistributedAdhoc.send_env_activate_perhost(include=[
+DistributedAdhoc.send_env_activate_everywhere(include=[
     "*.toml", "src/*.jl", "scripts/*.jl",
     "dev/*/*.toml", "dev/*/src/*.jl", "dev/*/src/*/*.jl",
     "data/*.csv",
 ])
 ```
 """
-function send_env_activate_perhost(env_dir=dirname(Base.active_project()); include::Vector)
+function send_env_activate_everywhere(env_dir=dirname(Base.active_project()); include::Vector)
     dir_by_pid = Dict{Int, String}()
     @sync for (host, pids) in pairs(host_to_pids_dict())
         @async begin
